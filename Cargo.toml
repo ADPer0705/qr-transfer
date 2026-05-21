@@ -3,7 +3,9 @@ name    = "qr-transfer"
 version = "0.1.0"
 edition = "2021"
 authors = ["adper"]
-description = "File transfer over QR codes — stop-and-wait ARQ in the terminal"
+description = "A bidirectional optical air-gap data transfer tool using QR codes."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ADPer0705/qr-transfer"
 
 [[bin]]
 name = "qrt"

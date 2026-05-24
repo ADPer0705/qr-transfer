@@ -1,11 +1,13 @@
 [package]
-name    = "qr-transfer"
-version = "0.1.0"
-edition = "2021"
-authors = ["adper"]
-description = "A bidirectional optical air-gap data transfer tool using QR codes."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/ADPer0705/qr-transfer"
+name        = "qr-transfer"
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["adper"]
+description = "File transfer over QR codes — stop-and-wait ARQ in the terminal"
+license     = "MIT"
+repository  = "https://github.com/ADPer0705/qr-transfer"
+keywords    = ["qr", "transfer", "arq", "terminal", "networking"]
+categories  = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "qrt"
@@ -30,8 +32,9 @@ qrcode = "0.14"
 rqrr  = "0.8"
 
 # Camera capture — uses the native OS backend
-image  = "0.25"
-nokhwa = { version = "0.10", features = ["input-native"] }
+image     = "0.25"
+imageproc = "0.25"
+nokhwa    = { version = "0.10", features = ["input-native"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

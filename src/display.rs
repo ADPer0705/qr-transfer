@@ -26,7 +26,14 @@ const BANNER: &str = r"
 
 /// Clear the terminal and render a QR code, followed by status lines.
 pub fn qr(data: &str, status: &[&str]) -> anyhow::Result<()> {
-    let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L)?;
+    // EcLevel::H — 30% data recovery capacity.
+    // We don't care about transfer speed (this is a for-fun project), and H
+    // makes the code dramatically more resilient to:
+    //   • webcam glare / bloom from the screen backlight
+    //   • terminal line-height micro-gaps between Dense1x2 half-block rows
+    //   • minor focus softness at close range
+    // The QR will be denser and slightly wider; that's fine and looks cooler.
+    let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::H)?;
     let rendered = code
         .render::<unicode::Dense1x2>()
         .dark_color(unicode::Dense1x2::Dark)

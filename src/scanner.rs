@@ -8,11 +8,15 @@ use crate::protocol::Packet;
 use anyhow::Result;
 use image::DynamicImage;
 use nokhwa::{
-    pixel_format::RgbFormat,
+    pixel_format::{LumaFormat, RgbFormat},
     utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType},
     Camera,
 };
-use std::{sync::mpsc, thread, time::Duration};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, mpsc,
+};
+use std::{thread, time::Duration};
 
 /// Print all cameras detected by the OS.
 pub fn list_cameras() -> Result<()> {
@@ -35,8 +39,10 @@ pub fn list_cameras() -> Result<()> {
 ///
 /// The thread runs until the `Sender` half of the channel is dropped (i.e.
 /// the main thread exits or `rx` is dropped).
-pub fn spawn(camera_index: u32) -> Result<mpsc::Receiver<Packet>> {
+pub fn spawn(camera_index: u32) -> Result<(mpsc::Receiver<Packet>, Arc<AtomicU64>)> {
     let (pkt_tx, pkt_rx) = mpsc::channel::<Packet>();
+    let frame_count = Arc::new(AtomicU64::new(0));
+    let fc = frame_count.clone();
 
     // sync_channel(0) = rendezvous: send blocks until recv is called.
     // Guarantees spawn() doesn't return until the camera is actually open.
@@ -74,53 +80,57 @@ pub fn spawn(camera_index: u32) -> Result<mpsc::Receiver<Packet>> {
 
         // ── Scan loop ─────────────────────────────────────────────────────────
         loop {
+            fc.fetch_add(1, Ordering::Relaxed);
+
             let frame = match camera.frame() {
                 Ok(f)  => f,
                 Err(_) => { thread::sleep(Duration::from_millis(50)); continue; }
             };
 
-            let rgb = match frame.decode_image::<RgbFormat>() {
-                Ok(img) => img,
-                Err(_)  => continue,
+            // Try RgbFormat first; fall back to LumaFormat for cameras that
+            // output grayscale natively (saves the RGB→luma conversion).
+            let gray = match frame.decode_image::<RgbFormat>() {
+                Ok(rgb) => DynamicImage::ImageRgb8(rgb).into_luma8(),
+                Err(_) => match frame.decode_image::<LumaFormat>() {
+                    Ok(luma) => luma,
+                    Err(_) => continue,
+                },
             };
 
-            // Convert to greyscale, then apply adaptive threshold to
-            // compensate for uneven screen glow and webcam exposure variance.
-            // This is the same trick phone cameras do in hardware — it gives
-            // rqrr clean black/white edges regardless of ambient lighting.
-            // Block radius 51 = ~25px neighbourhood; odd number required.
-            // Convert to greyscale, then apply adaptive threshold to
-            // compensate for uneven screen glow and webcam exposure variance.
-            let gray = DynamicImage::ImageRgb8(rgb).into_luma8();
-            let binarized = imageproc::contrast::adaptive_threshold(&gray, 51);
+            // Downscale to a reasonable max width so rqrr's internal threshold
+            // (width / 8) uses a local neighbourhood and can resolve QR modules.
+            // Without this, high-res webcam frames (~2K) make threshold_s huge
+            // (~240), effectively making the binarization global and unreliable.
+            const MAX_WIDTH: u32 = 480;
+            let gray = if gray.width() > MAX_WIDTH {
+                let scale = MAX_WIDTH as f64 / gray.width() as f64;
+                let h = (gray.height() as f64 * scale) as u32;
+                image::imageops::resize(&gray, MAX_WIDTH, h, image::imageops::FilterType::Triangle)
+            } else {
+                gray
+            };
 
-            // Hack: A lazy iterator. It yields the normal image first. 
-            // If the loop continues, it generates and yields the inverted (Dark Mode) image on the fly.
-            let polarities = std::iter::once(binarized.clone()).chain(std::iter::once_with(|| {
-                let mut inv = binarized;
-                image::imageops::invert(&mut inv);
-                inv
-            }));
+            // Try raw grayscale first (rqrr's own binarization handles most
+            // well-lit QR codes), then inverted for dark-mode terminals.
+            'outer: for (base, invert) in [(&gray, false), (&gray, true)] {
+                let img = if invert {
+                    let mut inv = (*base).clone();
+                    image::imageops::invert(&mut inv);
+                    inv
+                } else {
+                    (*base).clone()
+                };
 
-            for img in polarities {
                 let mut prepared = rqrr::PreparedImage::prepare(img);
-                let mut found_packet = false;
-
                 for grid in prepared.detect_grids() {
                     if let Ok((_meta, content)) = grid.decode() {
                         if let Ok(pkt) = Packet::from_json(&content) {
                             if pkt_tx.send(pkt).is_err() {
                                 return; // main thread dropped rx — exit cleanly
                             }
-                            found_packet = true;
+                            break 'outer;
                         }
                     }
-                }
-
-                // If we successfully decoded a packet, break out early.
-                // This saves us from doing the inverted pass and wasting CPU time!
-                if found_packet {
-                    break; 
                 }
             }
 
@@ -132,7 +142,7 @@ pub fn spawn(camera_index: u32) -> Result<mpsc::Receiver<Packet>> {
 
     // Block until the thread reports init success or failure.
     match init_rx.recv() {
-        Ok(Ok(())) => Ok(pkt_rx),
+        Ok(Ok(())) => Ok((pkt_rx, frame_count)),
         Ok(Err(msg)) => anyhow::bail!("Camera init failed: {}", msg),
         Err(_) => anyhow::bail!("Camera thread panicked during init"),
     }

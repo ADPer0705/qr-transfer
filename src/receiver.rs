@@ -26,22 +26,32 @@ use crate::{
     scanner,
 };
 use anyhow::{bail, Result};
-use std::{path::{PathBuf, Path}, sync::mpsc::RecvTimeoutError, time::{Duration, Instant}};
+use std::sync::{
+    atomic::Ordering,
+    mpsc::RecvTimeoutError,
+};
+use std::{
+    path::{PathBuf, Path},
+    time::{Duration, Instant},
+};
 
 pub fn run(output_dir: PathBuf, camera_index: u32) -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
 
     eprintln!("  Opening camera {} …", camera_index);
-    let rx = scanner::spawn(camera_index)?;
+    let (rx, frame_count) = scanner::spawn(camera_index)?;
     eprintln!("  Camera ready.\n");
 
     // ── Phase 1: Wait for INIT ────────────────────────────────────────────────
-    display::info(&[
-        "👂  Waiting for INIT from sender.",
-        "   Point the sender's screen at this camera.",
-    ])?;
 
     let mut assembler: FileAssembler = loop {
+        let n = frame_count.load(Ordering::Relaxed);
+        display::info(&[
+            "👂  Waiting for INIT from sender.",
+            &format!("   📷 scanning... (frame #{})", n),
+            "   Point the sender's screen at this camera.",
+        ])?;
+
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Packet::Init { filename, total_size, chunk_count, checksum }) => {
                 eprintln!(

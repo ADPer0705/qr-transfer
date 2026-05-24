@@ -43,7 +43,7 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
 
     // ── Start camera scanner ──────────────────────────────────────────────────
     eprintln!("  Opening camera {} …", camera_index);
-    let rx = scanner::spawn(camera_index)?;
+    let (rx, _frame_count) = scanner::spawn(camera_index)?;
     eprintln!("  Camera ready. Starting transfer.\n");
 
     // ── Pre-serialise the INIT packet (never changes) ─────────────────────────

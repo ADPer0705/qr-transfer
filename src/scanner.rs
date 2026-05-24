@@ -89,19 +89,38 @@ pub fn spawn(camera_index: u32) -> Result<mpsc::Receiver<Packet>> {
             // This is the same trick phone cameras do in hardware — it gives
             // rqrr clean black/white edges regardless of ambient lighting.
             // Block radius 51 = ~25px neighbourhood; odd number required.
+            // Convert to greyscale, then apply adaptive threshold to
+            // compensate for uneven screen glow and webcam exposure variance.
             let gray = DynamicImage::ImageRgb8(rgb).into_luma8();
-            let gray = imageproc::contrast::adaptive_threshold(&gray, 51);
+            let binarized = imageproc::contrast::adaptive_threshold(&gray, 51);
 
-            let mut prepared = rqrr::PreparedImage::prepare(gray);
-            let grids = prepared.detect_grids();
+            // Hack: A lazy iterator. It yields the normal image first. 
+            // If the loop continues, it generates and yields the inverted (Dark Mode) image on the fly.
+            let polarities = std::iter::once(binarized.clone()).chain(std::iter::once_with(|| {
+                let mut inv = binarized;
+                image::imageops::invert(&mut inv);
+                inv
+            }));
 
-            for grid in grids {
-                if let Ok((_meta, content)) = grid.decode() {
-                    if let Ok(pkt) = Packet::from_json(&content) {
-                        if pkt_tx.send(pkt).is_err() {
-                            return; // main thread dropped rx — exit cleanly
+            for img in polarities {
+                let mut prepared = rqrr::PreparedImage::prepare(img);
+                let mut found_packet = false;
+
+                for grid in prepared.detect_grids() {
+                    if let Ok((_meta, content)) = grid.decode() {
+                        if let Ok(pkt) = Packet::from_json(&content) {
+                            if pkt_tx.send(pkt).is_err() {
+                                return; // main thread dropped rx — exit cleanly
+                            }
+                            found_packet = true;
                         }
                     }
+                }
+
+                // If we successfully decoded a packet, break out early.
+                // This saves us from doing the inverted pass and wasting CPU time!
+                if found_packet {
+                    break; 
                 }
             }
 

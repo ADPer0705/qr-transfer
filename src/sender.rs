@@ -16,12 +16,16 @@
 
 use crate::{
     chunker::FileChunker,
-    display,
+    display::{self, DisplaySink, TerminalDisplay},
     protocol::{Packet, POLL_MS, RETRANSMIT_MS},
     scanner,
 };
 use anyhow::{bail, Result};
-use std::{path::PathBuf, sync::mpsc::RecvTimeoutError, time::{Duration, Instant}};
+use std::{
+    path::PathBuf,
+    sync::mpsc::{self, RecvTimeoutError},
+    time::{Duration, Instant},
+};
 
 #[derive(Debug)]
 enum Phase {
@@ -30,9 +34,9 @@ enum Phase {
     WaitFin,
 }
 
-pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
+pub fn run(file: PathBuf, camera_index: u32, chunk_size: usize) -> Result<()> {
     // ── Load file ─────────────────────────────────────────────────────────────
-    let chunker = FileChunker::load(&file)?;
+    let chunker = FileChunker::load_with_chunk_size(&file, chunk_size)?;
     eprintln!(
         "  Loaded '{}' — {} bytes in {} chunk(s)  [SHA-256: {}…]",
         chunker.filename,
@@ -46,6 +50,23 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
     let (rx, _frame_count) = scanner::spawn(camera_index)?;
     eprintln!("  Camera ready. Starting transfer.\n");
 
+    let mut display = TerminalDisplay;
+    run_with_io(
+        chunker,
+        &rx,
+        &mut display,
+        Duration::from_millis(RETRANSMIT_MS),
+        Duration::from_millis(300),
+    )
+}
+
+pub(crate) fn run_with_io<D: DisplaySink>(
+    chunker: FileChunker,
+    rx: &mpsc::Receiver<Packet>,
+    display: &mut D,
+    retransmit: Duration,
+    advance_delay: Duration,
+) -> Result<()> {
     // ── Pre-serialise the INIT packet (never changes) ─────────────────────────
     let init_json = Packet::Init {
         filename:    chunker.filename.clone(),
@@ -63,7 +84,7 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
         // ── Build + display QR for current phase ──────────────────────────────
         match &phase {
             Phase::Init => {
-                display::qr(
+                display.show_qr(
                     &init_json,
                     &[
                         "▶  INIT — broadcasting file metadata",
@@ -80,7 +101,7 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
             Phase::Data(seq) => {
                 let data = chunker.chunk_b64(*seq).expect("seq in range");
                 let pkt  = Packet::Data { seq: *seq, data }.to_json()?;
-                display::qr(
+                display.show_qr(
                     &pkt,
                     &[
                         &format!(
@@ -95,20 +116,20 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
             }
 
             Phase::WaitFin => {
-                display::info(&[
+                display.show_info(&[
                     "⏳  All chunks sent — waiting for receiver to verify and confirm.",
                 ])?;
             }
         }
 
         // ── Poll for response with retransmit timeout ─────────────────────────
-        let deadline = Instant::now() + Duration::from_millis(RETRANSMIT_MS);
+        let deadline = Instant::now() + retransmit;
         let mut advanced = false;
 
         'poll: loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                // Timeout — retransmit (outer loop re-displays same QR)
+                // Timeout — retransmit (outer loop updates retry counter on screen)
                 retries += 1;
                 break 'poll;
             }
@@ -118,8 +139,11 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
                 // ── Happy path ────────────────────────────────────────────────
                 Ok(Packet::InitAck) => {
                     if matches!(phase, Phase::Init) {
-                        eprintln!("  ✓ INIT acknowledged");
-                        phase   = Phase::Data(0);
+                        phase = if chunker.chunk_count == 0 {
+                            Phase::WaitFin
+                        } else {
+                            Phase::Data(0)
+                        };
                         retries = 0;
                         advanced = true;
                         break 'poll;
@@ -131,11 +155,9 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
                         if acked == current {
                             let next = current + 1;
                             if next < chunker.chunk_count {
-                                eprintln!("  ✓ ACK chunk {}", acked);
                                 phase   = Phase::Data(next);
                                 retries = 0;
                             } else {
-                                eprintln!("  ✓ ACK chunk {} (last)", acked);
                                 phase = Phase::WaitFin;
                             }
                             advanced = true;
@@ -146,7 +168,7 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
 
                 // ── Fin arrives (receiver confirmed) ──────────────────────────
                 Ok(Packet::Fin { saved_path }) => {
-                    display::info(&[
+                    display.show_info(&[
                         "🎉  Transfer complete!",
                         &format!("   Receiver saved the file as: {}", saved_path),
                         &format!("   SHA-256 verified ✓  ({}…)", &chunker.checksum[..16]),
@@ -154,11 +176,15 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
                     return Ok(());
                 }
 
-                // ── NAK → force immediate retransmit ──────────────────────────
+                // ── NAK → rewind only if receiver asks for a different chunk ──
                 Ok(Packet::Nak { seq }) => {
-                    eprintln!("  ✗ NAK for chunk {}", seq);
-                    retries += 1;
-                    break 'poll;
+                    if let Phase::Data(current) = phase {
+                        if seq < chunker.chunk_count && seq != current {
+                            phase = Phase::Data(seq);
+                            retries += 1;
+                            break 'poll;
+                        }
+                    }
                 }
 
                 Ok(Packet::Error { msg }) => {
@@ -177,8 +203,8 @@ pub fn run(file: PathBuf, camera_index: u32) -> Result<()> {
 
         // Give the other side time to display its response QR if we just
         // advanced — avoids the camera catching a blank screen mid-transition.
-        if advanced {
-            std::thread::sleep(Duration::from_millis(300));
+        if advanced && !advance_delay.is_zero() {
+            std::thread::sleep(advance_delay);
         }
     }
 }

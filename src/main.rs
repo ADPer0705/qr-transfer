@@ -32,6 +32,15 @@ enum Commands {
         /// Camera index to use for reading ACKs from the receiver
         #[arg(short, long, default_value = "0")]
         camera: u32,
+
+        /// Raw bytes per chunk (1..=2048; smaller = larger QR modules, easier to scan)
+        #[arg(
+            short = 's',
+            long,
+            default_value_t = protocol::CHUNK_SIZE as u16,
+            value_parser = clap::value_parser!(u16).range(1..=2048)
+        )]
+        chunk_size: u16,
     },
 
     /// Receive a file from another machine
@@ -53,8 +62,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Send   { file, camera } => sender::run(file, camera)?,
-        Commands::Recv   { output, camera } => receiver::run(output, camera)?,
+        Commands::Send { file, camera, chunk_size } => {
+            sender::run(file, camera, chunk_size as usize)?
+        }
+        Commands::Recv { output, camera } => receiver::run(output, camera)?,
         Commands::Cameras => scanner::list_cameras()?,
     }
 

@@ -18,8 +18,15 @@ pub struct FileChunker {
 }
 
 impl FileChunker {
-    /// Read the file, compute checksum, and split into chunks.
+    /// Read the file, compute checksum, and split into chunks of `CHUNK_SIZE` bytes.
+    #[allow(dead_code)]
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        Self::load_with_chunk_size(path, CHUNK_SIZE)
+    }
+
+    /// Read the file, compute checksum, and split into chunks of `chunk_size` bytes.
+    pub fn load_with_chunk_size(path: &Path, chunk_size: usize) -> anyhow::Result<Self> {
+        anyhow::ensure!(chunk_size > 0, "chunk_size must be greater than 0");
         let bytes = std::fs::read(path)?;
         let total_size = bytes.len() as u64;
 
@@ -29,7 +36,7 @@ impl FileChunker {
             hex::encode(h.finalize())
         };
 
-        let chunks: Vec<Vec<u8>> = bytes.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+        let chunks: Vec<Vec<u8>> = bytes.chunks(chunk_size).map(|c| c.to_vec()).collect();
         let chunk_count = chunks.len() as u32;
 
         let filename = path
@@ -121,5 +128,119 @@ impl FileAssembler {
         );
 
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("qrt_chunker_test_{}_{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn multi_chunk_roundtrip() {
+        let payload: Vec<u8> = (0u8..=255).cycle().take(400).collect();
+        let path = temp_file("multi.bin", &payload);
+
+        let chunker = FileChunker::load_with_chunk_size(&path, 128).unwrap();
+        assert_eq!(chunker.total_size, 400);
+        assert_eq!(chunker.chunk_count, 4);
+
+        let mut asm = FileAssembler::new(
+            chunker.filename.clone(),
+            chunker.total_size,
+            chunker.chunk_count,
+            chunker.checksum.clone(),
+        );
+        assert!(!asm.is_complete());
+
+        for seq in 0..chunker.chunk_count {
+            let b64 = chunker.chunk_b64(seq).unwrap();
+            assert!(asm.store(seq, &b64).unwrap());
+        }
+        assert!(asm.is_complete());
+        assert_eq!(asm.assemble().unwrap(), payload);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn duplicate_out_of_range_corrupt_and_checksum_errors() {
+        let payload = b"hello qr-transfer world!".to_vec();
+        let path = temp_file("check.txt", &payload);
+        let chunker = FileChunker::load_with_chunk_size(&path, 10).unwrap();
+
+        let mut asm = FileAssembler::new(
+            chunker.filename.clone(),
+            chunker.total_size,
+            chunker.chunk_count,
+            chunker.checksum.clone(),
+        );
+
+        let b0 = chunker.chunk_b64(0).unwrap();
+        assert!(asm.store(0, &b0).unwrap());
+        assert_eq!(asm.received, 1);
+
+        // Duplicate chunk should return Ok(false) without incrementing received
+        assert!(!asm.store(0, &b0).unwrap());
+        assert_eq!(asm.received, 1);
+
+        // Out-of-range seq should fail
+        assert!(asm.store(chunker.chunk_count, &b0).is_err());
+
+        // Corrupt base64 should fail
+        assert!(asm.store(1, "!!!not-valid-base64!!!").is_err());
+
+        // Store remaining chunks, then verify checksum mismatch is caught
+        for seq in 1..chunker.chunk_count {
+            let b = chunker.chunk_b64(seq).unwrap();
+            asm.store(seq, &b).unwrap();
+        }
+        assert!(asm.assemble().is_ok());
+
+        let mut bad_asm = FileAssembler::new(
+            chunker.filename.clone(),
+            chunker.total_size,
+            chunker.chunk_count,
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+        for seq in 0..chunker.chunk_count {
+            let b = chunker.chunk_b64(seq).unwrap();
+            bad_asm.store(seq, &b).unwrap();
+        }
+        assert!(bad_asm.assemble().is_err());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn empty_file_roundtrip() {
+        let path = temp_file("empty.txt", b"");
+        let chunker = FileChunker::load_with_chunk_size(&path, 128).unwrap();
+        assert_eq!(chunker.total_size, 0);
+        assert_eq!(chunker.chunk_count, 0);
+        assert!(chunker.chunk_b64(0).is_none());
+
+        let asm = FileAssembler::new(
+            chunker.filename.clone(),
+            chunker.total_size,
+            chunker.chunk_count,
+            chunker.checksum.clone(),
+        );
+        assert!(asm.is_complete());
+        assert_eq!(asm.assemble().unwrap(), Vec::<u8>::new());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

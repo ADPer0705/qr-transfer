@@ -1,6 +1,6 @@
 [package]
 name        = "qr-transfer"
-version     = "0.1.3"
+version     = "0.1.4"
 edition     = "2021"
 authors     = ["adper"]
 description = "File transfer over QR codes — stop-and-wait ARQ in the terminal"

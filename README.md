@@ -55,16 +55,17 @@ The protocol also models real networking concepts:
 
 | Parameter              | Value                              |
 |------------------------|------------------------------------|
-| `CHUNK_SIZE`           | 512 raw bytes                      |
-| base64 overhead        | × 4/3 → 684 chars                  |
-| JSON envelope          | ~20 chars → **≈ 704 bytes total**  |
-| QR version / EC level  | v23 / EC-L  (max 741 bytes)        |
-| QR module grid         | 109 × 109 modules                  |
-| Terminal width needed  | ~111 columns                       |
+| `CHUNK_SIZE`           | 128 raw bytes (override via `-s`)  |
+| base64 overhead        | × 4/3 → 172 chars                  |
+| JSON envelope          | ~24 chars → **≈ 196 bytes total**  |
+| QR version / EC level  | v10 / EC-M  (max 213 bytes)        |
+| QR module grid         | 57 × 57 modules                    |
+| Terminal size needed   | ~65 columns × 33 rows              |
 
-Increasing `CHUNK_SIZE` (in `src/protocol.rs`) will reduce the number of round
-trips for large files but requires a wider terminal and better camera focus.
-QR v40 EC-L tops out at 2 953 bytes per code.
+Increasing `--chunk-size` (up to `2048`) will reduce the number of round
+trips for large files, at the cost of denser QR codes that require a wider
+terminal and sharper camera focus.
+QR v40 EC-M tops out at 2 331 bytes per code.
 
 ### Rough throughput estimate
 
@@ -72,9 +73,9 @@ Assuming ~2 s per round trip (show QR + scan + show ACK + scan):
 
 | Chunk size | Throughput       |
 |------------|------------------|
+| 128 B      | ~64 B/s          |
 | 512 B      | ~256 B/s         |
 | 1 024 B    | ~512 B/s         |
-| 2 048 B    | ~1 KB/s          |
 
 This is intentionally slow — it is art, not SCP.
 
@@ -104,6 +105,9 @@ On macOS the first run will trigger a camera-permission dialog — allow it.
 
 # Sender (laptop 1)
 ./target/release/qrt send path/to/file.zip --camera 0
+
+# Sender with larger chunks (for high-res cameras / wide terminals)
+./target/release/qrt send path/to/file.zip --camera 0 --chunk-size 512
 
 # Receiver (laptop 2)
 ./target/release/qrt recv --output ~/received/ --camera 0

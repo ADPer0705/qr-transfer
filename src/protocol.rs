@@ -24,13 +24,14 @@ use serde::{Deserialize, Serialize};
 
 /// Raw bytes per chunk before base64 encoding.
 ///
-/// base64(512) = 684 chars  +  JSON envelope ≈ 710 bytes.
-/// That fits comfortably in QR version 23 at EC level L (max 741 bytes),
-/// which renders as ~109 columns in the terminal.
+/// base64(128) = 172 chars  +  JSON envelope ≈ 196 bytes.
+/// That fits comfortably in QR version 10 at EC level M (max 213 bytes),
+/// which renders as ~65 columns × 33 rows in the terminal (including quiet zone)
+/// — large enough for reliable webcam focus on any standard laptop terminal.
 ///
-/// Increase cautiously: v40 EC-L tops out at 2 953 bytes, but the QR will be
-/// 177 modules wide — you'll need a very wide terminal and good camera focus.
-pub const CHUNK_SIZE: usize = 512;
+/// Increase cautiously via `--chunk-size`: larger chunks reduce round trips
+/// but produce denser QR codes that need wider terminals and sharper focus.
+pub const CHUNK_SIZE: usize = 128;
 
 /// How long to wait for a response before retransmitting the same QR (ms).
 pub const RETRANSMIT_MS: u64 = 5_000;
